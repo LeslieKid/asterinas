@@ -50,7 +50,7 @@ impl RcuMonitor {
             // Now that the current GP is complete, take its callbacks
             let current_callbacks = state.current_gp.take_callbacks();
 
-            // Check if we need to70G watch for a next GP
+            // Check if we need to watch for a next GP
             if !state.next_callbacks.is_empty() {
                 let callbacks = core::mem::take(&mut state.next_callbacks);
                 state.current_gp.restart(callbacks);

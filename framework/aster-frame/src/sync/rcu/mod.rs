@@ -8,9 +8,11 @@ use core::sync::atomic::{
     AtomicPtr,
     Ordering::{AcqRel, Acquire},
 };
+use spin::once::Once;
 
 use self::monitor::RcuMonitor;
 use crate::prelude::*;
+use crate::arch::x86::cpu;
 use crate::sync::WaitQueue;
 
 mod monitor;
@@ -70,7 +72,7 @@ pub struct RcuReclaimer<P> {
 impl<P: Send + 'static> RcuReclaimer<P> {
     pub fn delay(mut self) {
         let ptr: P = unsafe {
-            let ptr = core::mem::replace(&mut self.ptr, core::mem::uninitialized());
+            let ptr = core::mem::replace(&mut self.ptr, core::mem::MaybeUninit::uninit().assume_init());
 
             core::mem::forget(self);
 
@@ -99,6 +101,10 @@ pub unsafe fn pass_quiescent_state() {
     get_singleton().pass_quiescent_state()
 }
 
+static MONITOR: Once<RcuMonitor> = Once::new();
+
 fn get_singleton() -> &'static RcuMonitor {
-    todo!()
+    let num_cpus = cpu::num_cpus() as usize;
+    let monitor = MONITOR.call_once(|| RcuMonitor::new(num_cpus));
+    monitor
 }
