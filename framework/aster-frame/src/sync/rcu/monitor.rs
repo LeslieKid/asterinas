@@ -8,9 +8,10 @@ use core::sync::atomic::{
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::cpu;
-use crate::prelude::*;
-use crate::sync::AtomicBits;
-use crate::sync::SpinLock;
+use crate::{
+    prelude::*,
+    sync::{AtomicBits, SpinLock},
+};
 
 /// A RCU monitor ensures the completion of _grace periods_ by keeping track
 /// of each CPU's passing _quiescent states_.
@@ -20,6 +21,10 @@ pub struct RcuMonitor {
 }
 
 impl RcuMonitor {
+    /// Creates a new RCU monitor.
+    ///
+    /// This function is used to initialize a singleton instance of `RcuMonitor`.
+    /// The singleton instance is globally accessible via the `get_singleton()` function.
     pub fn new(num_cpus: usize) -> Self {
         Self {
             is_monitoring: AtomicBool::new(false),
