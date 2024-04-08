@@ -62,10 +62,8 @@ pub use owner_ptr::OwnerPtr;
 ///
 /// // Read the data protected by rcu
 /// {
-///     rcu_read_lock();
 ///     let rcu_guard = rcu.get();
 ///     assert_eq!(*rcu_guard, 42);
-///     rcu_read_unlock();
 /// }
 ///
 /// // Update the data protected by rcu
@@ -102,13 +100,14 @@ impl<P: OwnerPtr> Rcu<P> {
     /// # Safety
     ///
     /// The pointer protected by the Rcu must be valid and point to a valid object.
+    // TODO: Distinguish different type RCU
     pub fn get(&self) -> RcuReadGuard<'_, P> {
-        let preempt_guard = disable_preempt();
+        let guard = disable_preempt();
         let obj = unsafe { &*self.ptr.load(Acquire) };
         RcuReadGuard {
             obj,
             rcu: self,
-            preempt_guard,
+            inner_guard: InnerGuard::PreemptGuard(guard),
         }
     }
 }
@@ -128,15 +127,21 @@ impl<P: OwnerPtr + Send> Rcu<P> {
     }
 }
 
+enum InnerGuard {
+    PreemptGuard(DisablePreemptGuard),
+    NullGuard,
+}
+
 /// It is used to safely access the target object while the RCU is active.
-/// 
+///
 /// # Non-Preemptible RCU
-/// 
-/// The `preempt_guard` is used to access the target object with preemption-disabled while the RCU is active.
+///
+/// The `inner_guard` could be used as PreemptGuard to access the target object with
+/// preemption-disabled while the RCU is active.
 pub struct RcuReadGuard<'a, P: OwnerPtr> {
     obj: &'a <P as OwnerPtr>::Target,
     rcu: &'a Rcu<P>,
-    preempt_guard: DisablePreemptGuard,
+    inner_guard: InnerGuard,
 }
 
 impl<'a, P: OwnerPtr> Deref for RcuReadGuard<'a, P> {
