@@ -16,7 +16,11 @@ use spin::once::Once;
 use self::monitor::RcuMonitor;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::cpu;
-use crate::{prelude::*, sync::WaitQueue};
+use crate::{
+    prelude::*,
+    sync::WaitQueue,
+    task::{disable_preempt, DisablePreemptGuard},
+};
 
 mod monitor;
 mod owner_ptr;
@@ -35,7 +39,7 @@ pub use owner_ptr::OwnerPtr;
 /// memory, all readers are guaranteed to see and traverse either the older or the
 /// new structure, therefore avoiding inconsistencies and allowing readers to not be
 /// blocked by writers.
-/// 
+///
 /// The type parameter `P` represents the data that this rcu is protecting. The type
 /// parameter `P` must implement `OwnerPtr`.
 ///
@@ -58,8 +62,10 @@ pub use owner_ptr::OwnerPtr;
 ///
 /// // Read the data protected by rcu
 /// {
+///     rcu_read_lock();
 ///     let rcu_guard = rcu.get();
 ///     assert_eq!(*rcu_guard, 42);
+///     rcu_read_unlock();
 /// }
 ///
 /// // Update the data protected by rcu
@@ -88,21 +94,30 @@ impl<P: OwnerPtr> Rcu<P> {
 
     /// Retrieves a read guard for the RCU mechanism.
     ///
-    /// This method returns a `RcuReadGuard` which allows read-only access to the underlying 
-    /// data protected by the RCU mechanism.   
-    /// 
+    /// This method returns a `RcuReadGuard` which allows read-only access to the
+    /// underlying data protected by the RCU mechanism.   
+    ///
+    /// This function has the semantics of _subscribe_ in RCU mechanism.
+    ///
     /// # Safety
     ///
     /// The pointer protected by the Rcu must be valid and point to a valid object.
     pub fn get(&self) -> RcuReadGuard<'_, P> {
+        let preempt_guard = disable_preempt();
         let obj = unsafe { &*self.ptr.load(Acquire) };
-        RcuReadGuard { obj, rcu: self }
+        RcuReadGuard {
+            obj,
+            rcu: self,
+            preempt_guard,
+        }
     }
 }
 
 impl<P: OwnerPtr + Send> Rcu<P> {
-    /// Replaces the current pointer with a new pointer and returns a `RcuReclaimer` that can be 
-    /// used to reclaim the old pointer.
+    /// Replaces the current pointer with a new pointer and returns a `RcuReclaimer` that
+    /// can be used to reclaim the old pointer.
+    ///
+    /// This function has the semantics of _publish_ in RCU mechanism.
     pub fn replace(&self, new_ptr: P) -> RcuReclaimer<P> {
         let new_ptr = <P as OwnerPtr>::into_raw(new_ptr) as *mut _;
         let old_ptr = {
@@ -113,9 +128,15 @@ impl<P: OwnerPtr + Send> Rcu<P> {
     }
 }
 
+/// It is used to safely access the target object while the RCU is active.
+/// 
+/// # Non-Preemptible RCU
+/// 
+/// The `preempt_guard` is used to access the target object with preemption-disabled while the RCU is active.
 pub struct RcuReadGuard<'a, P: OwnerPtr> {
     obj: &'a <P as OwnerPtr>::Target,
     rcu: &'a Rcu<P>,
+    preempt_guard: DisablePreemptGuard,
 }
 
 impl<'a, P: OwnerPtr> Deref for RcuReadGuard<'a, P> {
@@ -162,21 +183,22 @@ impl<P> Drop for RcuReclaimer<P> {
     }
 }
 
-/// Passes the quiescent state to the singleton RcuMonitor.
-/// 
+/// Passes the quiescent state to the singleton RcuMonitor and take the callbacks if
+/// the current GP is complete.
+///
 /// # Non-Preemptible RCU
-/// 
+///
 /// This function is commonly used when the thread is in the user state or idle loop,
 /// or when calling `schedule()` to indicate that the cpu is entering the quiescent state.
 pub unsafe fn pass_quiescent_state() {
     get_singleton().pass_quiescent_state()
 }
 
-static MONITOR: Once<RcuMonitor> = Once::new();
+static RCU_MONITOR: Once<RcuMonitor> = Once::new();
 
 /// Retrieves the singleton RcuMonitor instance.
 fn get_singleton() -> &'static RcuMonitor {
     let num_cpus = cpu::num_cpus() as usize;
-    let monitor = MONITOR.call_once(|| RcuMonitor::new(num_cpus));
+    let monitor = RCU_MONITOR.call_once(|| RcuMonitor::new(num_cpus));
     monitor
 }
