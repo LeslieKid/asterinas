@@ -66,6 +66,7 @@ pub fn init() {
     arch::after_all_init();
     bus::init();
     invoke_ffi_init_funcs();
+    sync::init();
 }
 
 fn invoke_ffi_init_funcs() {

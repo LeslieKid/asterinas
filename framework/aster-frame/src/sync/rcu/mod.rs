@@ -3,12 +3,10 @@
 //! Read-copy update (RCU).
 
 use core::{
-    marker::PhantomData,
-    ops::Deref,
-    sync::atomic::{
+        marker::PhantomData, ops::Deref, sync::atomic::{
         AtomicPtr,
         Ordering::{AcqRel, Acquire},
-    },
+    }
 };
 
 use spin::once::Once;
@@ -16,6 +14,7 @@ use spin::once::Once;
 use self::monitor::RcuMonitor;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::cpu;
+use crate::sync::SpinLock;
 use crate::{
     prelude::*,
     sync::WaitQueue,
@@ -59,7 +58,7 @@ pub use owner_ptr::OwnerPtr;
 /// use aster_frame::sync::{Rcu, RcuReadGuard, RcuReclaimer};
 ///
 /// let rcu = Rcu::new(Box::new(42));
-///
+/// 
 /// // Read the data protected by rcu
 /// {
 ///     let rcu_guard = rcu.get();
@@ -69,10 +68,11 @@ pub use owner_ptr::OwnerPtr;
 /// // Update the data protected by rcu
 /// {
 ///     let reclaimer = rcu.replace(Box::new(43));
-///     let rcu_guard = rcu.get();
-///     assert_eq!(*rcu_guard, 43);
 ///     // Delay the reclamation of the old data
 ///     reclaimer.delay();
+/// 
+///     let rcu_guard = rcu.get();
+///     assert_eq!(*rcu_guard, 43);
 /// }
 /// ```
 pub struct Rcu<P: OwnerPtr> {
@@ -100,6 +100,11 @@ impl<P: OwnerPtr> Rcu<P> {
     /// # Safety
     ///
     /// The pointer protected by the Rcu must be valid and point to a valid object.
+    ///
+    /// # Non-Preemptible RCU
+    ///
+    /// In non-preemptible RCU, the read-side critical section is delimited using
+    /// a `PreemptGuard`.
     // TODO: Distinguish different type RCU
     pub fn get(&self) -> RcuReadGuard<'_, P> {
         let guard = disable_preempt();
@@ -107,7 +112,7 @@ impl<P: OwnerPtr> Rcu<P> {
         RcuReadGuard {
             obj,
             rcu: self,
-            inner_guard: InnerGuard::PreemptGuard(guard),
+            inner_guard: InnerGuard::Preempt(guard),
         }
     }
 }
@@ -128,8 +133,8 @@ impl<P: OwnerPtr + Send> Rcu<P> {
 }
 
 enum InnerGuard {
-    PreemptGuard(DisablePreemptGuard),
-    NullGuard,
+    Preempt(DisablePreemptGuard),
+    Empty,
 }
 
 /// It is used to safely access the target object while the RCU is active.
@@ -169,7 +174,9 @@ impl<P: Send + 'static> RcuReclaimer<P> {
 
             ptr
         };
-        get_singleton().after_grace_period(move || {
+
+        let rcu_monitor = RCU_MONITOR.get().unwrap().lock();
+        rcu_monitor.after_grace_period(move || {
             drop(ptr);
         });
     }
@@ -178,7 +185,8 @@ impl<P: Send + 'static> RcuReclaimer<P> {
 impl<P> Drop for RcuReclaimer<P> {
     fn drop(&mut self) {
         let wq = Arc::new(WaitQueue::new());
-        get_singleton().after_grace_period({
+        let rcu_monitor = RCU_MONITOR.get().unwrap().lock();
+        rcu_monitor.after_grace_period({
             let wq = wq.clone();
             move || {
                 wq.wake_one();
@@ -196,14 +204,15 @@ impl<P> Drop for RcuReclaimer<P> {
 /// This function is commonly used when the thread is in the user state or idle loop,
 /// or when calling `schedule()` to indicate that the cpu is entering the quiescent state.
 pub unsafe fn pass_quiescent_state() {
-    get_singleton().pass_quiescent_state()
+    let rcu_monitor = RCU_MONITOR.get().unwrap().lock();
+    rcu_monitor.pass_quiescent_state()
 }
 
-static RCU_MONITOR: Once<RcuMonitor> = Once::new();
+static RCU_MONITOR: Once<SpinLock<RcuMonitor>> = Once::new();
 
-/// Retrieves the singleton RcuMonitor instance.
-fn get_singleton() -> &'static RcuMonitor {
-    let num_cpus = cpu::num_cpus() as usize;
-    let monitor = RCU_MONITOR.call_once(|| RcuMonitor::new(num_cpus));
-    monitor
+pub fn init() {
+    RCU_MONITOR.call_once(|| {
+        let num_cpus = cpu::num_cpus() as usize;
+        SpinLock::new(RcuMonitor::new(num_cpus))
+    }); 
 }

@@ -117,7 +117,7 @@ impl GracePeriod {
         Self {
             callbacks: Default::default(),
             cpu_mask: AtomicBits::new_zeroes(num_cpus),
-            is_complete: false,
+            is_complete: true,
         }
     }
 
